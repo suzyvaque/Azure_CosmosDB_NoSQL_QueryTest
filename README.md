@@ -55,6 +55,25 @@ Azure 호스팅 챗봇의 관리 ID를 사용할 경우 해당 관리 ID의 **ob
 Azure 호스트에서 활성화됩니다. 로컬에서는 같은 코드가 Azure CLI/개발자 자격 증명을
 사용하므로 비밀정보 없이 data-plane RBAC 동작을 검증할 수 있습니다.
 
+## Private Endpoint
+
+현재 구성은 `vm-working-dbtest-vnet`의 `default` subnet에 Cosmos DB SQL API용
+`pe-cosmos-query-test` Private Endpoint를 만듭니다. 함께 구성되는 항목은 다음과 같습니다.
+
+- Private DNS Zone: `privatelink.documents.azure.com`
+- VNet DNS link: `vm-working-dbtest-vnet-cosmos`
+- Private DNS Zone Group: `cosmos-private-dns`
+- Cosmos 공용 네트워크: `Disabled` 유지
+
+```powershell
+.\scripts\setup-private-endpoint.ps1
+```
+
+Private Endpoint를 사용하려면 쿼리 UI와 Python 클라이언트를 해당 VNet 내부 VM 또는 VNet에
+연결된 네트워크에서 실행해야 합니다. 검증 기준은
+`db-cosmos-basic-test.documents.azure.com`이 `10.1.0.5` Private IP로 해석되고 TCP 443
+연결이 성공하는 것입니다. 공용 인터넷에서 실행하면 의도적으로 차단됩니다.
+
 ## 2. Python 환경과 데이터 준비
 
 ```powershell
@@ -63,6 +82,25 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 python .\src\cosmos_query_test.py --seed --verbose
 ```
+
+## Query UI
+
+`open-query-ui` VS Code task를 실행하거나 아래 명령으로 로컬 화면을 엽니다.
+
+```powershell
+.\.venv\Scripts\streamlit.exe run .\src\app.py
+```
+
+화면에서 **PK 지정** 또는 **PK 미지정** 샘플을 고른 다음 실행합니다. PK 지정은
+`/session_id = session-01`을 사용하고, PK 미지정은 cross-partition query를 사용합니다.
+결과 화면은 요청별 및 합산 `Status code`, `Substatus code`, `RequestCharge`, `DurationMs`와
+반환 문서 수를 보여 줍니다.
+
+`QueryPlan 요청 수`가 1 이상이면 SDK 4.16.x가 `400/1004`
+`CROSS_PARTITION_QUERY_NOT_SERVABLE` 응답을 처리하고 Gateway QueryPlan fallback을 호출한
+것입니다. 이 카운터는 SDK 4.16.x의 fallback 메서드를 계측하므로, SDK 버전을 변경하면
+계측 호환성을 다시 검증해야 합니다. UI는 인증 정보와 요청 authorization header를 표시하거나
+저장하지 않습니다.
 
 `--seed`는 10개의 논리 파티션에 총 100건을 upsert한 뒤 **파티션 키 없이**
 cross-partition query를 실행합니다. SDK 진단 로그에는 HTTP 요청 정보가 출력될 수
@@ -86,29 +124,37 @@ python .\src\cosmos_query_test.py --session-id session-01 --verbose
 .\scripts\show-service-availability.ps1 -Minutes 30
 ```
 
-`CDBDataPlaneRequests`의 `StatusCode == 400 and SubStatusCode == 1004` 요청 수와
-1분 단위 `ServiceAvailability` 변화를 나란히 비교하면 내부 쿼리 플랜 요청이 서비스
-가용성 계산에 반영되는지 실측할 수 있습니다. 진단 설정 이전 요청은 소급 수집되지
-않습니다.
+이 계정의 `ServiceAvailability`는 1시간, 6시간, 12시간 또는 1일 단위만 지원합니다.
+또한 resource-specific `CDBDataPlaneRequests` 스키마에는 `SubStatusCode` 열이 없습니다.
+따라서 native Cosmos 진단 로그만으로 `400/1004`만 다른 400에서 정확히 분리할 수는
+없습니다. 이 프로젝트는 SDK의 QueryPlan fallback을 `AppEvents` custom telemetry로
+기록하여 해당 substatus를 보존합니다. 실측 결과는
+[docs/test-results-2026-09-17.md](docs/test-results-2026-09-17.md)를 참고하십시오.
 
 ## 4. 오류 집계와 Alert
 
-예상된 쿼리 플랜 협상 응답을 제외하는 핵심 조건은 다음과 같습니다.
+예상된 쿼리 플랜 협상 응답을 제외하는 핵심 조건은 `AppEvents` custom telemetry에서
+다음과 같습니다.
 
 ```kusto
 | where StatusCode >= 400
-| where not(StatusCode == 400 and SubStatusCode == 1004)
+| where not(StatusCode == 400 and SubstatusCode == 1004)
 ```
 
 [KQL 분석 파일](kql/cosmos-400-1004-analysis.kql)의 마지막 쿼리는 최근 5분의
-`AggregatedValue`를 반환합니다. Azure Monitor **custom log search alert**에서 결과가
-0보다 큰 경우를 발화 조건으로 사용하면 됩니다. 이 방식은 원본 플랫폼 메트릭을
-변경하지 않고, `400/1004`가 제외된 별도의 오류 신호를 만듭니다.
+`AggregatedValue`를 반환합니다. 이 프로젝트는 `400/1004`를 제외한 오류가 0보다 클
+때만 경보를 발생시키는 scheduled query rule도 배포합니다.
+
+```powershell
+.\scripts\deploy-actionable-error-alert.ps1
+```
+
+이 방식은 원본 플랫폼 metric을 변경하지 않고, `400/1004`가 제외된 별도의 오류 신호를
+만듭니다. KQL 결과는 Log Analytics에서 Workbook 또는 Azure Dashboard에 pin할 수 있습니다.
 
 Metric alert는 `SubStatusCode` 차원을 제공하지 않으므로 이 필터에는 scheduled query
-rule이 적합합니다. 필요하면 같은 KQL 결과를 애플리케이션에서 Azure Monitor custom
-metric으로 발행할 수 있지만, 이 테스트에는 추가 수집 코드와 비용이 없는 log alert가
-더 직접적입니다.
+rule이 적합합니다. 실제 챗봇도 Cosmos 호출을 감싸 `statusCode`, `substatusCode`를 포함한
+custom telemetry를 전송해야 정확한 제외 집계가 가능합니다.
 
 ## 정리
 

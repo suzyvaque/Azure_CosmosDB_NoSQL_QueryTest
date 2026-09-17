@@ -1,39 +1,41 @@
-// Resource-specific diagnostic table: CDBDataPlaneRequests
-// Adjust the time range in Log Analytics before running these queries.
+// CDBDataPlaneRequests resource-specific schema does NOT contain SubStatusCode.
+// It can show the 400 request, but cannot distinguish 400/1004 from another 400.
 
-// 1) Confirm whether query-plan 400/1004 requests are present.
+// 1) Native Cosmos diagnostics: all 400 responses and their server duration.
 CDBDataPlaneRequests
-| where StatusCode == 400 and SubStatusCode == 1004
-| project TimeGenerated, OperationName, DatabaseName, CollectionName,
-          StatusCode, SubStatusCode, RequestCharge, DurationMs,
-          ActivityId, RegionName, UserAgent
+| where StatusCode == 400
+| project TimeGenerated, OperationName, StatusCode, RequestCharge, DurationMs,
+          ActivityId, ConnectionMode, ClientIpAddress
 | order by TimeGenerated desc
 
-// 2) Error aggregate that excludes the expected query-plan negotiation response.
-CDBDataPlaneRequests
+// 2) Custom application telemetry: SDK-instrumented query-plan fallbacks.
+// This works because the client telemetry explicitly preserves substatusCode.
+AppEvents
+| where Name in ("CosmosQueryPlanFallback", "CosmosRequest")
+| extend Cosmos = parse_json(Properties)
+| extend StatusCode = toint(Cosmos.statusCode),
+         SubstatusCode = toint(Cosmos.substatusCode),
+         ExpectedQueryPlanFallback = tostring(Cosmos.expectedQueryPlanFallback)
+| project TimeGenerated, Name, StatusCode, SubstatusCode,
+          ExpectedQueryPlanFallback, Measurements, Cosmos
+| order by TimeGenerated desc
+
+// 3) Dashboard query: aggregate only actionable failures.
+AppEvents
+| where Name in ("CosmosQueryPlanFallback", "CosmosRequest")
+| extend Cosmos = parse_json(Properties)
+| extend StatusCode = toint(Cosmos.statusCode), SubstatusCode = toint(Cosmos.substatusCode)
 | where StatusCode >= 400
-| where not(StatusCode == 400 and SubStatusCode == 1004)
-| summarize ErrorCount=count(),
-            RequestUnits=sum(RequestCharge),
-            P95DurationMs=percentile(DurationMs, 95)
-          by bin(TimeGenerated, 5m), StatusCode, SubStatusCode
+| where not(StatusCode == 400 and SubstatusCode == 1004)
+| summarize ErrorCount = sum(ItemCount) by bin(TimeGenerated, 5m), StatusCode, SubstatusCode
 | order by TimeGenerated desc
 
-// 3) Compare all failures with failures after excluding 400/1004.
-CDBDataPlaneRequests
-| summarize TotalRequests=count(),
-            AllFailedRequests=countif(StatusCode >= 400),
-            QueryPlan400_1004=countif(StatusCode == 400 and SubStatusCode == 1004),
-            ActionableFailures=countif(StatusCode >= 400 and
-                not(StatusCode == 400 and SubStatusCode == 1004))
-          by bin(TimeGenerated, 5m)
-| extend AvailabilityIncluding1004 = 100.0 * (TotalRequests - AllFailedRequests) / TotalRequests,
-         AvailabilityExcluding1004 = 100.0 * (TotalRequests - ActionableFailures) / TotalRequests
-| order by TimeGenerated desc
-
-// 4) Scheduled-query alert condition: result > 0 means actionable errors exist.
-CDBDataPlaneRequests
-| where StatusCode >= 400
-| where not(StatusCode == 400 and SubStatusCode == 1004)
+// 4) Scheduled-query alert: the expected 400/1004 results in AggregatedValue = 0.
+AppEvents
+| where Name in ("CosmosQueryPlanFallback", "CosmosRequest")
 | where TimeGenerated >= ago(5m)
-| summarize AggregatedValue=count()
+| extend Cosmos = parse_json(Properties)
+| extend StatusCode = toint(Cosmos.statusCode), SubstatusCode = toint(Cosmos.substatusCode)
+| where StatusCode >= 400
+| where not(StatusCode == 400 and SubstatusCode == 1004)
+| summarize AggregatedValue = sum(ItemCount)

@@ -19,7 +19,7 @@ $start = $end.AddMinutes(-$Minutes)
 & $az monitor metrics list `
     --resource $account.id `
     --metric ServiceAvailability `
-    --interval PT1M `
+    --interval PT1H `
     --aggregation Average `
     --start-time $start.ToString("o") `
     --end-time $end.ToString("o") `
