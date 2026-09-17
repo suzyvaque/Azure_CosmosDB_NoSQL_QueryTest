@@ -1,0 +1,55 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "install",
+			"type": "shell",
+			"command": ".\\.venv\\Scripts\\python.exe",
+			"args": [
+				"-m",
+				"pip",
+				"install",
+				"-r",
+				"requirements.txt",
+				"pytest"
+			],
+			"problemMatcher": []
+		},
+		{
+			"label": "test",
+			"type": "shell",
+			"command": ".\\.venv\\Scripts\\python.exe",
+			"args": [
+				"-m",
+				"pytest",
+				"-q"
+			],
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "setup-azure",
+			"type": "shell",
+			"command": ".\\scripts\\setup-azure.ps1",
+			"problemMatcher": []
+		},
+		{
+			"label": "seed-and-run-cross-partition-query",
+			"type": "shell",
+			"command": "$env:PATH = 'C:\\Program Files\\Microsoft SDKs\\Azure\\CLI2\\wbin;' + $env:PATH; .\\.venv\\Scripts\\python.exe .\\src\\cosmos_query_test.py --seed --verbose",
+			"problemMatcher": []
+		},
+		{
+			"label": "Temporarily allow current client IP",
+			"type": "shell",
+			"command": ".\\scripts\\allow-client-ip.ps1",
+			"args": [
+				"-IpAddress",
+				"20.196.138.27"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
+}

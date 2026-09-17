@@ -1,0 +1,39 @@
+// Resource-specific diagnostic table: CDBDataPlaneRequests
+// Adjust the time range in Log Analytics before running these queries.
+
+// 1) Confirm whether query-plan 400/1004 requests are present.
+CDBDataPlaneRequests
+| where StatusCode == 400 and SubStatusCode == 1004
+| project TimeGenerated, OperationName, DatabaseName, CollectionName,
+          StatusCode, SubStatusCode, RequestCharge, DurationMs,
+          ActivityId, RegionName, UserAgent
+| order by TimeGenerated desc
+
+// 2) Error aggregate that excludes the expected query-plan negotiation response.
+CDBDataPlaneRequests
+| where StatusCode >= 400
+| where not(StatusCode == 400 and SubStatusCode == 1004)
+| summarize ErrorCount=count(),
+            RequestUnits=sum(RequestCharge),
+            P95DurationMs=percentile(DurationMs, 95)
+          by bin(TimeGenerated, 5m), StatusCode, SubStatusCode
+| order by TimeGenerated desc
+
+// 3) Compare all failures with failures after excluding 400/1004.
+CDBDataPlaneRequests
+| summarize TotalRequests=count(),
+            AllFailedRequests=countif(StatusCode >= 400),
+            QueryPlan400_1004=countif(StatusCode == 400 and SubStatusCode == 1004),
+            ActionableFailures=countif(StatusCode >= 400 and
+                not(StatusCode == 400 and SubStatusCode == 1004))
+          by bin(TimeGenerated, 5m)
+| extend AvailabilityIncluding1004 = 100.0 * (TotalRequests - AllFailedRequests) / TotalRequests,
+         AvailabilityExcluding1004 = 100.0 * (TotalRequests - ActionableFailures) / TotalRequests
+| order by TimeGenerated desc
+
+// 4) Scheduled-query alert condition: result > 0 means actionable errors exist.
+CDBDataPlaneRequests
+| where StatusCode >= 400
+| where not(StatusCode == 400 and SubStatusCode == 1004)
+| where TimeGenerated >= ago(5m)
+| summarize AggregatedValue=count()

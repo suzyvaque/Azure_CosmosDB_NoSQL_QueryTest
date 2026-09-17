@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.pfx
+*.key
+
+# Test output
+*.log
+output/
+
+# Editors / OS
+.vscode/settings.json
+.DS_Store
+Thumbs.db
